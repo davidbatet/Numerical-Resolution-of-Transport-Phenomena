@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated CFD / heat-transfer output files
+*.vtk
+*.vtu
+*.npy
+*.npz
