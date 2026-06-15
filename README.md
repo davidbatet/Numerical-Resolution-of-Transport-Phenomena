@@ -1,4 +1,4 @@
-# Finite Volume CFD and Heat-Transfer Solvers
+# Numerical Resolution of Transport Phenomena
 
 This repository contains a collection of self-developed numerical solvers for heat transfer, convection-diffusion and incompressible fluid-flow benchmark problems.
 
@@ -28,10 +28,16 @@ The incompressible Navier-Stokes equations are solved using a fractional-step pr
 
 Some advanced cases include non-uniform mesh refinement, Boussinesq coupling for natural convection and immersed-boundary forcing for the square-cylinder flow problem.
 
+## Representative figures
+
+The `assets/` folder contains a small selection of representative images from some of the most relevant benchmark cases. These figures are not intended to include every result produced by the solvers, but to provide visual examples of the numerical simulations developed in the project.
+
+The selected figures correspond to key benchmark problems such as lid-driven cavity flow, differentially heated cavity natural convection and square-cylinder laminar flow.
+
 ## Repository structure
 
 ```text
-finite-volume-cfd-heat-transfer/
+Numerical-Resolution-of-Transport-Phenomena/
 ├── 01_1d_heat_conduction/
 ├── 02_2d_transient_conduction/
 ├── 03_2d_convection_diffusion/
@@ -39,6 +45,7 @@ finite-volume-cfd-heat-transfer/
 ├── 05_lid_driven_cavity/
 ├── 06_differentially_heated_cavity/
 ├── 07_square_cylinder_laminar_flow/
+├── assets/
 ├── LICENSE
 ├── README.md
 └── requirements.txt
@@ -60,8 +67,31 @@ They can be installed with:
 pip install -r requirements.txt
 ```
 
+## How to run
+
+Each benchmark case is organized in an independent folder. To run a case, enter the corresponding directory and execute its main script.
+
+For example:
+
+```bash
+cd 05_lid_driven_cavity/uniform_mesh
+python main.py
+```
+
+or:
+
+```bash
+cd 07_square_cylinder_laminar_flow/uniform_mesh
+python main.py
+```
+
+Some cases may require longer execution times due to the use of dense matrix assembly and direct matrix inversion.
+
 ## Notes
 
 The objective of this repository is educational and methodological. The solvers are intentionally implemented from first principles in order to expose the numerical formulation, discretization strategy and validation process.
 
 For large-scale simulations, sparse matrices, iterative linear solvers and optimized data structures would be more appropriate than the dense-matrix approach used in several examples.
+
+The full Bachelor's Thesis report is available in a separate repository.
+
