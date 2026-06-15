@@ -1,0 +1,458 @@
+"""
+2D laminar flow around a square cylinder on a refined non-uniform MAC grid.
+
+Numerical method:
+    - Incompressible Navier-Stokes equations
+    - Staggered MAC grid
+    - Tanh-refined non-uniform channel mesh
+    - Fractional-step / projection method
+    - AB2 time integration for the momentum predictor
+    - Central or upwind convective discretization
+    - Dense pressure Poisson matrix
+    - Immersed boundary method using a Peskin-type regularized delta kernel
+    - Direct forcing to impose no-slip on the immersed square cylinder
+
+Post-processing:
+    - Drag and lift coefficient history
+    - Wake probe signal
+    - Strouhal-number estimation
+    - Divergence diagnostics
+    - IBM slip diagnostics
+
+Author: David Batet Romero
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from functions import (
+    build_mac_grid_rect_tanh,
+    create_fields,
+    initialize_channel_flow,
+    add_localized_vertical_perturbation,
+    build_square_lagrangian_boundary,
+    assemble_K_poisson_channel_nonuniform,
+    invert_K,
+    run_solver_square_cylinder_peskin_dense_nonuniform,
+    compute_cell_center_velocity,
+    compute_vorticity_cell_center_nonuniform,
+    compute_strouhal_from_signal,
+    compute_signal_window_stats,
+)
+
+
+# Problem geometry
+xmin = 0.0
+xmax = 60.0
+ymin = 0.0
+ymax = 20.0
+
+D = 1.0
+x_cyl = 10.0
+y_cyl = 0.5 * (ymin + ymax)
+
+
+# Numerical scheme
+scheme = "central"   # "central" or "upwind"
+
+
+# Grid parameters
+Ny = 40
+Nx = int(round((xmax - xmin) / (ymax - ymin) * Ny))
+
+beta_x = 1.5
+beta_y = 1.0
+
+x_refine = x_cyl
+y_refine = y_cyl
+
+
+# Flow parameters
+Umax = 1.0
+Umean = 2.0 * Umax / 3.0
+Uref = Umean
+
+Re = 200.0
+rho = 1.0
+nu = Uref * D / Re
+
+
+# Time-stepping parameters
+verbose_every = 100
+
+Cconv = 0.20
+Cvisc = 0.20
+relax = 0.30
+dtp = 5.0e-1
+
+t_conv_target = 120.0
+
+
+# Immersed boundary parameters
+n_ibm_iter_pre = 5
+force_relax_pre = 1.0
+tol_slip_pre = 5.0e-3
+
+
+# Initial perturbation
+eps_pert = 2.0e-2
+
+
+# Post-processing and plot settings
+PLOT = "speed"   # "speed", "pressure", "u", "v", "stream", "speed+stream", "quiver", "vorticity"
+LEVELS = 60
+CMAP = "turbo"
+
+probe_x = x_cyl + 6.0 * D
+probe_y = y_cyl
+
+tconv_start_stats = 80.0
+tconv_start_strouhal = 80.0
+
+
+# Grid and field initialization
+grid = build_mac_grid_rect_tanh(
+    xmin=xmin,
+    xmax=xmax,
+    ymin=ymin,
+    ymax=ymax,
+    Nx=Nx,
+    Ny=Ny,
+    x_refine=x_refine,
+    y_refine=y_refine,
+    beta_x=beta_x,
+    beta_y=beta_y,
+)
+
+fields = create_fields(Nx, Ny)
+
+initialize_channel_flow(fields, grid, Umax)
+
+add_localized_vertical_perturbation(
+    fields=fields,
+    grid=grid,
+    x0=x_cyl + 1.0 * D,
+    y0=y_cyl,
+    D=D,
+    amplitude=eps_pert * Uref,
+    sigma_x=0.8 * D,
+    sigma_y=0.5 * D,
+    antisymmetric_in_y=True,
+)
+
+
+# Immersed square-cylinder geometry
+ds_target = 0.5 * min(
+    np.min(grid["dx_cell"]),
+    np.min(grid["dy_cell"]),
+)
+
+lag = build_square_lagrangian_boundary(
+    xc=x_cyl,
+    yc=y_cyl,
+    D=D,
+    ds_target=ds_target,
+)
+
+
+# Time-step calculation
+umin = max(Umax, 1.0e-14)
+
+dx_min = np.min(grid["dx_u_cv"])
+dy_min = np.min(grid["dy_v_cv"])
+
+dxc_min = np.min(grid["dx_cell"])
+dyc_min = np.min(grid["dy_cell"])
+
+dt_conv = Cconv * min(dx_min / umin, dy_min / umin)
+dt_visc = Cvisc * min(dxc_min * dxc_min, dyc_min * dyc_min) / max(nu, 1.0e-14)
+
+dt = min(relax * min(dt_conv, dt_visc), dtp)
+
+T_target = t_conv_target * D / Uref
+nsteps = int(np.ceil(T_target / dt))
+
+blockage_ratio = D / (ymax - ymin)
+
+
+# Simulation summary
+print("GRID / PHYSICAL SETTINGS")
+print(f"Nx = {Nx}, Ny = {Ny}")
+print(f"dx_min = {np.min(grid['dx_cell']):.6f}, dx_max = {np.max(grid['dx_cell']):.6f}")
+print(f"dy_min = {np.min(grid['dy_cell']):.6f}, dy_max = {np.max(grid['dy_cell']):.6f}")
+print(f"D/dx_min = {D / np.min(grid['dx_cell']):.3f}")
+print(f"D/dy_min = {D / np.min(grid['dy_cell']):.3f}")
+print(f"Blockage ratio D/H = {blockage_ratio:.5f}")
+print(f"Umax = {Umax:.6f}")
+print(f"Umean = {Umean:.6f}")
+print(f"Uref = {Uref:.6f}")
+print(f"Re = {Re:.6f}")
+print(f"nu = {nu:.6e}")
+print(f"dt_conv = {dt_conv:.6e}")
+print(f"dt_visc = {dt_visc:.6e}")
+print(f"dt_used = {dt:.6e}")
+print(f"nsteps = {nsteps}")
+print(f"Final simulated time = {nsteps * dt:.6f}")
+print(f"Final convective time = {(nsteps * dt * Uref / D):.6f}")
+print(f"scheme = {scheme}")
+print(f"Nlag total = {lag['Nlag']} | n per side = {lag['n_per_side']} | ds = {lag['ds']:.6f}")
+print(f"IBM pre iterations = {n_ibm_iter_pre} | tol = {tol_slip_pre:.2e}")
+
+
+# Pressure Poisson matrix
+print("Building and inverting pressure Poisson matrix...", flush=True)
+
+K = assemble_K_poisson_channel_nonuniform(grid)
+K_inv = invert_K(K)
+
+print("Starting square-cylinder solver...", flush=True)
+
+
+# Solver
+results = run_solver_square_cylinder_peskin_dense_nonuniform(
+    fields=fields,
+    grid=grid,
+    lag=lag,
+    rho=rho,
+    nu=nu,
+    dt=dt,
+    nsteps=nsteps,
+    K_inv=K_inv,
+    Umax=Umax,
+    Uref=Uref,
+    D=D,
+    probe_x=probe_x,
+    probe_y=probe_y,
+    scheme=scheme,
+    n_ibm_iter_pre=n_ibm_iter_pre,
+    force_relax_pre=force_relax_pre,
+    tol_slip_pre=tol_slip_pre,
+    verbose_every=verbose_every,
+)
+
+fields = results["fields"]
+history = results["history"]
+
+
+# Post-processing
+p = fields["p"]
+
+u_center, v_center = compute_cell_center_velocity(fields, grid)
+speed = np.sqrt(u_center**2 + v_center**2)
+
+omega = compute_vorticity_cell_center_nonuniform(u_center, v_center, grid)
+
+t_hist = np.array(history["time"])
+cd_hist = np.array(history["Cd"])
+cl_hist = np.array(history["Cl"])
+vp_hist = np.array(history["v_probe"])
+
+tconv_hist = t_hist * Uref / D
+
+mask_stats = tconv_hist >= tconv_start_stats
+mask_st = tconv_hist >= tconv_start_strouhal
+
+if np.count_nonzero(mask_stats) > 20:
+    cd_stats = compute_signal_window_stats(cd_hist[mask_stats])
+    cl_stats = compute_signal_window_stats(cl_hist[mask_stats])
+else:
+    cd_stats = None
+    cl_stats = None
+
+if np.count_nonzero(mask_st) > 50:
+    St_cl = compute_strouhal_from_signal(
+        t_hist[mask_st],
+        cl_hist[mask_st],
+        D=D,
+        Uref=Uref,
+    )
+
+    St_probe = compute_strouhal_from_signal(
+        t_hist[mask_st],
+        vp_hist[mask_st],
+        D=D,
+        Uref=Uref,
+    )
+else:
+    St_cl = np.nan
+    St_probe = np.nan
+
+
+# Final diagnostics
+print("FINAL DIAGNOSTICS")
+print(f"Estimated Strouhal from Cl         = {St_cl:.6f}")
+print(f"Estimated Strouhal from probe      = {St_probe:.6f}")
+print(f"Final max divergence               = {history['divmax'][-1]:.6e}")
+print(f"Final l2  divergence               = {history['divl2'][-1]:.6e}")
+print(f"Final max divergence exterior      = {history['divext_max'][-1]:.6e}")
+print(f"Final l2  divergence exterior      = {history['divext_l2'][-1]:.6e}")
+print(f"Final mass imbalance               = {history['mass_imbalance'][-1]:.6e}")
+print(f"Final slip after IBM pre max       = {history['slip_ibm_pre_max'][-1]:.6e}")
+print(f"Final slip after IBM pre l2        = {history['slip_ibm_pre_l2'][-1]:.6e}")
+print(f"Final slip after projection max    = {history['slip_after_proj_max'][-1]:.6e}")
+print(f"Final slip after projection l2     = {history['slip_after_proj_l2'][-1]:.6e}")
+
+if cd_stats is not None and cl_stats is not None:
+    print(f"Cd_mean over periodic window       = {cd_stats['mean']:.6f}")
+    print(f"Cd_pp over periodic window         = {cd_stats['pp']:.6f}")
+    print(f"Cl_mean over periodic window       = {cl_stats['mean']:.6f}")
+    print(f"Cl_pp over periodic window         = {cl_stats['pp']:.6f}")
+
+
+# Field visualization
+x_c = grid["x_c"]
+y_c = grid["y_c"]
+
+Xc = grid["Xc"]
+Yc = grid["Yc"]
+
+plt.figure(figsize=(12, 5))
+
+if PLOT == "speed":
+    plt.contourf(Xc, Yc, speed, LEVELS, cmap=CMAP)
+    plt.colorbar(label="|u|")
+
+elif PLOT == "pressure":
+    plt.contourf(Xc, Yc, p, LEVELS, cmap=CMAP)
+    plt.colorbar(label="p_corr")
+
+elif PLOT == "u":
+    plt.contourf(Xc, Yc, u_center, LEVELS, cmap="coolwarm")
+    plt.colorbar(label="u")
+
+elif PLOT == "v":
+    plt.contourf(Xc, Yc, v_center, LEVELS, cmap="coolwarm")
+    plt.colorbar(label="v")
+
+elif PLOT == "stream":
+    plt.streamplot(x_c, y_c, u_center, v_center, density=1.6, linewidth=0.7)
+
+elif PLOT == "speed+stream":
+    plt.contourf(Xc, Yc, speed, LEVELS, cmap=CMAP)
+    plt.colorbar(label="|u|")
+    plt.streamplot(
+        x_c,
+        y_c,
+        u_center,
+        v_center,
+        density=1.25,
+        linewidth=0.55,
+        color="k",
+    )
+
+elif PLOT == "quiver":
+    plt.contourf(Xc, Yc, speed, LEVELS, cmap=CMAP)
+    plt.colorbar(label="|u|")
+
+    stepx = max(1, len(x_c) // 45)
+    stepy = max(1, len(y_c) // 20)
+
+    plt.quiver(
+        Xc[::stepy, ::stepx],
+        Yc[::stepy, ::stepx],
+        u_center[::stepy, ::stepx],
+        v_center[::stepy, ::stepx],
+        color="k",
+        scale=35.0,
+    )
+
+elif PLOT == "vorticity":
+    plt.contourf(Xc, Yc, omega, LEVELS, cmap="RdBu_r")
+    plt.colorbar(label="omega")
+
+else:
+    raise ValueError(f"Unknown PLOT option: {PLOT}")
+
+
+# Immersed square-cylinder outline
+x_square = [
+    x_cyl - 0.5 * D,
+    x_cyl + 0.5 * D,
+    x_cyl + 0.5 * D,
+    x_cyl - 0.5 * D,
+    x_cyl - 0.5 * D,
+]
+
+y_square = [
+    y_cyl - 0.5 * D,
+    y_cyl - 0.5 * D,
+    y_cyl + 0.5 * D,
+    y_cyl + 0.5 * D,
+    y_cyl - 0.5 * D,
+]
+
+plt.plot(x_square, y_square, "k-", lw=2.0)
+
+plt.xlabel("x")
+plt.ylabel("y")
+plt.title(
+    f"Square cylinder refined MAC | Re={Re:g} | "
+    f"St(Cl) ≈ {St_cl:.4f} | St(probe) ≈ {St_probe:.4f}"
+)
+
+plt.tight_layout()
+plt.show()
+
+
+# Force-coefficient history
+plt.figure(figsize=(10, 4))
+plt.plot(history["time"], history["Cd"], label="Cd")
+plt.plot(history["time"], history["Cl"], label="Cl")
+plt.xlabel("t")
+plt.ylabel("Coefficient")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# Wake-probe history
+plt.figure(figsize=(10, 4))
+plt.plot(history["time"], history["u_probe"], label="u_probe")
+plt.plot(history["time"], history["v_probe"], label="v_probe")
+plt.xlabel("t")
+plt.ylabel("Velocity at wake probe")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# Divergence history
+plt.figure(figsize=(10, 4))
+plt.plot(history["time"], history["divmax"], label="max|div|")
+plt.plot(history["time"], history["divl2"], label="l2(div)")
+plt.plot(history["time"], history["divext_max"], label="max|div| exterior")
+plt.plot(history["time"], history["divext_l2"], label="l2(div) exterior")
+plt.xlabel("t")
+plt.ylabel("Divergence")
+plt.yscale("log")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# IBM slip history
+plt.figure(figsize=(10, 4))
+plt.plot(history["time"], history["slip_ibm_pre_max"], label="slip after IBM pre")
+plt.plot(history["time"], history["slip_after_proj_max"], label="slip after projection")
+plt.xlabel("t")
+plt.ylabel("IBM slip")
+plt.yscale("log")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# Mass imbalance history
+plt.figure(figsize=(10, 4))
+plt.plot(history["time"], history["mass_imbalance"], label="mass imbalance")
+plt.xlabel("t")
+plt.ylabel("|Qout - Qin| / |Qin|")
+plt.yscale("log")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
